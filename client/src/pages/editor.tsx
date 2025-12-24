@@ -121,6 +121,7 @@ export default function EditorPage() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPoints, setCurrentPoints] = useState<number[]>([]);
   const [anglePoints, setAnglePoints] = useState<number[]>([]);
+  const [anglePreviewPoint, setAnglePreviewPoint] = useState<{x: number, y: number} | null>(null);
   
   const [strokeColor, setStrokeColor] = useState('#3b82f6');
   const [fillColor, setFillColor] = useState('transparent');
@@ -628,10 +629,15 @@ export default function EditorPage() {
   };
 
   const handlePointerMove = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
-    if (!isDrawing) return;
-
     const pos = getPointerPosition(e);
     if (!pos) return;
+
+    if (activeTool === 'angle' && anglePoints.length >= 2) {
+      setAnglePreviewPoint({ x: pos.x, y: pos.y });
+      return;
+    }
+
+    if (!isDrawing) return;
 
     if (activeTool === 'freehand') {
       const lastX = currentPoints[currentPoints.length - 2];
@@ -785,6 +791,7 @@ export default function EditorPage() {
       
       addShape(shape);
       setAnglePoints([]);
+      setAnglePreviewPoint(null);
     }
   }, [anglePoints, strokeColor, fillColor, strokeWidth, opacity, lineStyle]);
 
@@ -1486,6 +1493,33 @@ export default function EditorPage() {
       listening: false,
     };
 
+    if (anglePoints.length === 2 && anglePreviewPoint) {
+      return (
+        <>
+          <Line
+            points={[anglePoints[0], anglePoints[1], anglePreviewPoint.x, anglePreviewPoint.y]}
+            {...previewProps}
+            dash={[5, 5]}
+          />
+          <Circle
+            x={anglePoints[0]}
+            y={anglePoints[1]}
+            radius={5}
+            fill={strokeColor}
+            listening={false}
+          />
+          <Circle
+            x={anglePreviewPoint.x}
+            y={anglePreviewPoint.y}
+            radius={4}
+            fill={strokeColor}
+            opacity={0.5}
+            listening={false}
+          />
+        </>
+      );
+    }
+
     if (anglePoints.length === 2) {
       return (
         <Circle
@@ -1499,19 +1533,89 @@ export default function EditorPage() {
     }
 
     if (anglePoints.length === 4) {
+      const [x1, y1, x2, y2] = anglePoints;
+      const x3 = anglePreviewPoint?.x ?? x2;
+      const y3 = anglePreviewPoint?.y ?? y2;
+      
+      const v1x = x1 - x2;
+      const v1y = y1 - y2;
+      const v2x = x3 - x2;
+      const v2y = y3 - y2;
+      
+      const dot = v1x * v2x + v1y * v2y;
+      const mag1 = Math.sqrt(v1x * v1x + v1y * v1y);
+      const mag2 = Math.sqrt(v2x * v2x + v2y * v2y);
+      
+      let previewAngle = 0;
+      if (mag1 > 0 && mag2 > 0) {
+        const cosAngle = dot / (mag1 * mag2);
+        previewAngle = Math.acos(Math.max(-1, Math.min(1, cosAngle))) * (180 / Math.PI);
+      }
+      
+      const angle1 = Math.atan2(y1 - y2, x1 - x2);
+      const angle2 = Math.atan2(y3 - y2, x3 - x2);
+      const startAngle = Math.min(angle1, angle2);
+      let sweepAngle = Math.abs(angle2 - angle1);
+      if (sweepAngle > Math.PI) sweepAngle = 2 * Math.PI - sweepAngle;
+      
       return (
         <>
           <Line
-            points={[anglePoints[0], anglePoints[1], anglePoints[2], anglePoints[3]]}
+            points={[x1, y1, x2, y2]}
             {...previewProps}
           />
+          <Line
+            points={[x2, y2, x3, y3]}
+            {...previewProps}
+            dash={anglePreviewPoint ? [5, 5] : undefined}
+          />
+          <Arc
+            x={x2}
+            y={y2}
+            innerRadius={25}
+            outerRadius={25}
+            angle={sweepAngle * (180 / Math.PI)}
+            rotation={startAngle * (180 / Math.PI)}
+            stroke={strokeColor}
+            strokeWidth={1}
+            listening={false}
+          />
+          <Rect
+            x={x2 + 30}
+            y={y2 - 22}
+            width={60}
+            height={24}
+            fill="rgba(0, 0, 0, 0.75)"
+            cornerRadius={4}
+            listening={false}
+          />
+          <Text
+            x={x2 + 35}
+            y={y2 - 18}
+            text={`${previewAngle.toFixed(1)}°`}
+            fontSize={16}
+            fill="#ffffff"
+            fontFamily="JetBrains Mono, monospace"
+            fontStyle="bold"
+            listening={false}
+          />
           <Circle
-            x={anglePoints[2]}
-            y={anglePoints[3]}
+            x={x2}
+            y={y2}
             radius={5}
             fill={strokeColor}
             listening={false}
           />
+          {anglePreviewPoint && (
+            <Circle
+              x={x3}
+              y={y3}
+              radius={4}
+              fill={strokeColor}
+              opacity={0.5}
+              listening={false}
+            />
+          )}
         </>
       );
     }
