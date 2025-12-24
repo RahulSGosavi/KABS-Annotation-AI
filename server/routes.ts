@@ -11,7 +11,19 @@ import { annotationLoginSchema, annotationSignupSchema } from "@shared/schema";
 
 const execAsync = promisify(exec);
 
-async function convertPdfToImages(pdfPath: string, outputDir: string): Promise<{ pageCount: number; pages: { pageNumber: number; imagePath: string; width: number; height: number }[] }> {
+function extractPageNumber(filename: string): number {
+  const match = filename.match(/page-(\d+)\.png$/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+function sortPageFiles(files: string[]): string[] {
+  return files.filter(f => f.startsWith('page-') && f.endsWith('.png'))
+    .sort((a, b) => extractPageNumber(a) - extractPageNumber(b));
+}
+
+const conversionLocks = new Map<string, Promise<{ pageCount: number; pages: { pageNumber: number; imagePath: string }[] }>>();
+
+async function convertPdfToImages(pdfPath: string, outputDir: string): Promise<{ pageCount: number; pages: { pageNumber: number; imagePath: string }[] }> {
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
@@ -21,12 +33,10 @@ async function convertPdfToImages(pdfPath: string, outputDir: string): Promise<{
   try {
     await execAsync(`pdftoppm -png -r 150 "${pdfPath}" "${outputPrefix}"`);
     
-    const files = fs.readdirSync(outputDir).filter(f => f.startsWith('page-') && f.endsWith('.png')).sort();
+    const files = sortPageFiles(fs.readdirSync(outputDir));
     const pages = files.map((file, index) => ({
       pageNumber: index + 1,
       imagePath: path.join(outputDir, file),
-      width: 0,
-      height: 0,
     }));
     
     return { pageCount: pages.length, pages };
@@ -34,6 +44,41 @@ async function convertPdfToImages(pdfPath: string, outputDir: string): Promise<{
     console.error('PDF conversion error:', error);
     throw new Error('Failed to convert PDF to images');
   }
+}
+
+async function ensurePageImagesExist(projectId: string, pdfUrl: string): Promise<{ pageCount: number; files: string[] }> {
+  const pagesDir = path.join(uploadDir, projectId, 'pages');
+  
+  if (fs.existsSync(pagesDir)) {
+    const files = sortPageFiles(fs.readdirSync(pagesDir));
+    if (files.length > 0) {
+      return { pageCount: files.length, files };
+    }
+  }
+  
+  const lockKey = projectId;
+  let conversionPromise = conversionLocks.get(lockKey);
+  
+  if (!conversionPromise) {
+    const pdfFilename = pdfUrl.replace('/uploads/', '');
+    const pdfPath = path.join(uploadDir, pdfFilename);
+    
+    if (!fs.existsSync(pdfPath)) {
+      throw new Error('PDF file not found');
+    }
+    
+    conversionPromise = convertPdfToImages(pdfPath, pagesDir);
+    conversionLocks.set(lockKey, conversionPromise);
+    
+    conversionPromise.finally(() => {
+      conversionLocks.delete(lockKey);
+    });
+  }
+  
+  await conversionPromise;
+  
+  const files = sortPageFiles(fs.readdirSync(pagesDir));
+  return { pageCount: files.length, files };
 }
 
 // Configure multer for PDF uploads
@@ -206,11 +251,22 @@ export async function registerRoutes(
 
       if (pageCount > 0) {
         const newPagesDir = path.join(uploadDir, project.id, 'pages');
-        if (fs.existsSync(pagesDir)) {
+        const newProjectDir = path.join(uploadDir, project.id);
+        
+        if (!fs.existsSync(newProjectDir)) {
+          fs.mkdirSync(newProjectDir, { recursive: true });
+        }
+        
+        if (fs.existsSync(pagesDir) && !fs.existsSync(newPagesDir)) {
           fs.renameSync(pagesDir, newPagesDir);
-          const projectDir = path.join(uploadDir, projectId);
-          if (fs.existsSync(projectDir)) {
-            fs.rmdirSync(projectDir, { recursive: true });
+        }
+        
+        const tempProjectDir = path.join(uploadDir, projectId);
+        if (fs.existsSync(tempProjectDir) && tempProjectDir !== newProjectDir) {
+          try {
+            fs.rmSync(tempProjectDir, { recursive: true, force: true });
+          } catch (cleanupError) {
+            console.log('Cleanup of temp directory failed (non-critical):', cleanupError);
           }
         }
       }
@@ -293,7 +349,7 @@ export async function registerRoutes(
     }
   });
 
-  // Get page image URL for a project
+  // Get page image URL for a project (with lazy conversion for legacy projects)
   app.get('/api/projects/:id/pages/:pageNumber', async (req, res) => {
     try {
       const { id, pageNumber } = req.params;
@@ -303,13 +359,11 @@ export async function registerRoutes(
         return res.status(404).json({ message: 'Project not found' });
       }
       
-      const pagesDir = path.join(uploadDir, id, 'pages');
-      
-      if (!fs.existsSync(pagesDir)) {
-        return res.status(404).json({ message: 'Page images not found' });
+      if (!project.pdfUrl) {
+        return res.status(404).json({ message: 'No PDF associated with this project' });
       }
       
-      const files = fs.readdirSync(pagesDir).filter(f => f.endsWith('.png')).sort();
+      const { pageCount, files } = await ensurePageImagesExist(id, project.pdfUrl);
       const pageIndex = parseInt(pageNumber) - 1;
       
       if (pageIndex < 0 || pageIndex >= files.length) {
@@ -317,14 +371,14 @@ export async function registerRoutes(
       }
       
       const imageUrl = `/uploads/${id}/pages/${files[pageIndex]}`;
-      res.json({ imageUrl, pageNumber: parseInt(pageNumber), totalPages: files.length });
+      res.json({ imageUrl, pageNumber: parseInt(pageNumber), totalPages: pageCount });
     } catch (error) {
       console.error('Get page error:', error);
       res.status(500).json({ message: 'Internal server error' });
     }
   });
 
-  // Get all page images for a project
+  // Get all page images for a project (with lazy conversion for legacy projects)
   app.get('/api/projects/:id/pages', async (req, res) => {
     try {
       const { id } = req.params;
@@ -334,19 +388,17 @@ export async function registerRoutes(
         return res.status(404).json({ message: 'Project not found' });
       }
       
-      const pagesDir = path.join(uploadDir, id, 'pages');
-      
-      if (!fs.existsSync(pagesDir)) {
+      if (!project.pdfUrl) {
         return res.json({ pages: [], totalPages: 0 });
       }
       
-      const files = fs.readdirSync(pagesDir).filter(f => f.endsWith('.png')).sort();
+      const { pageCount, files } = await ensurePageImagesExist(id, project.pdfUrl);
       const pages = files.map((file, index) => ({
         pageNumber: index + 1,
         imageUrl: `/uploads/${id}/pages/${file}`,
       }));
       
-      res.json({ pages, totalPages: pages.length });
+      res.json({ pages, totalPages: pageCount });
     } catch (error) {
       console.error('Get pages error:', error);
       res.status(500).json({ message: 'Internal server error' });
