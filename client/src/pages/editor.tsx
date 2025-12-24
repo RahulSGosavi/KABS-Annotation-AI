@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useParams } from 'wouter';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Stage, Layer, Rect, Circle, Line, Arrow, Text, Transformer } from 'react-konva';
-import * as pdfjs from 'pdfjs-dist';
+import { Stage, Layer, Rect, Circle, Line, Arrow, Text, Transformer, Image } from 'react-konva';
 import { useAuth } from '@/lib/auth-context';
 import { queryClient } from '@/lib/queryClient';
 import { Button } from '@/components/ui/button';
@@ -56,8 +55,6 @@ import {
 import type { Project, AnnotationShape, LayerData } from '@shared/schema';
 import Konva from 'konva';
 
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
-
 type Tool = 'select' | 'freehand' | 'line' | 'arrow' | 'rect' | 'circle' | 'text' | 'measurement' | 'angle' | 'eraser';
 
 const tools: { id: Tool; icon: typeof MousePointer2; label: string; shortcut: string }[] = [
@@ -106,8 +103,8 @@ export default function EditorPage() {
   
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [pdfImage, setPdfImage] = useState<HTMLImageElement | null>(null);
-  const [pdfDocument, setPdfDocument] = useState<pdfjs.PDFDocumentProxy | null>(null);
+  const [pageImage, setPageImage] = useState<HTMLImageElement | null>(null);
+  const [pageLoading, setPageLoading] = useState(false);
   
   const [layers, setLayers] = useState<LayerData[]>([
     { id: 'pdf-background', name: 'PDF Background', type: 'pdf', visible: true, locked: true, shapes: [] },
@@ -184,63 +181,53 @@ export default function EditorPage() {
   }, [params.id, currentPage, layers, saveAnnotationsMutation]);
 
   useEffect(() => {
-    const loadPdf = async () => {
-      if (!project?.pdfUrl) return;
+    const loadPageImage = async () => {
+      if (!params.id) return;
       
+      setPageLoading(true);
       try {
-        const loadingTask = pdfjs.getDocument(project.pdfUrl);
-        const pdf = await loadingTask.promise;
-        setPdfDocument(pdf);
-        setTotalPages(pdf.numPages);
-        setCurrentPage(parseInt(project.currentPage) || 1);
+        const response = await fetch(`/api/projects/${params.id}/pages/${currentPage}`);
+        if (!response.ok) {
+          throw new Error('Failed to load page');
+        }
+        
+        const data = await response.json();
+        setTotalPages(data.totalPages || 1);
+        
+        if (data.imageUrl) {
+          const img = new window.Image();
+          img.crossOrigin = 'anonymous';
+          img.src = data.imageUrl;
+          img.onload = () => {
+            setPageImage(img);
+            fitToScreen(img.width, img.height);
+            setPageLoading(false);
+          };
+          img.onerror = () => {
+            console.error('Failed to load page image');
+            setPageLoading(false);
+            toast({
+              title: 'Error',
+              description: 'Failed to load page image.',
+              variant: 'destructive',
+            });
+          };
+        } else {
+          setPageLoading(false);
+        }
       } catch (error) {
-        console.error('Failed to load PDF:', error);
+        console.error('Failed to load page:', error);
+        setPageLoading(false);
         toast({
           title: 'Error',
-          description: 'Failed to load PDF. Please try again.',
+          description: 'Failed to load page. Please try again.',
           variant: 'destructive',
         });
       }
     };
 
-    loadPdf();
-  }, [project?.pdfUrl, toast]);
-
-  useEffect(() => {
-    const renderPage = async () => {
-      if (!pdfDocument) return;
-      
-      try {
-        const page = await pdfDocument.getPage(currentPage);
-        const scale = 2;
-        const viewport = page.getViewport({ scale });
-        
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) return;
-        
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        
-        await page.render({
-          canvasContext: context,
-          viewport: viewport,
-          canvas: canvas,
-        } as any).promise;
-        
-        const img = new Image();
-        img.src = canvas.toDataURL();
-        img.onload = () => {
-          setPdfImage(img);
-          fitToScreen(img.width, img.height);
-        };
-      } catch (error) {
-        console.error('Failed to render page:', error);
-      }
-    };
-
-    renderPage();
-  }, [pdfDocument, currentPage]);
+    loadPageImage();
+  }, [params.id, currentPage, toast]);
 
   useEffect(() => {
     const loadAnnotations = async () => {
@@ -337,8 +324,8 @@ export default function EditorPage() {
     
     const containerWidth = containerRef.current.offsetWidth;
     const containerHeight = containerRef.current.offsetHeight;
-    const width = imgWidth || pdfImage?.width || 800;
-    const height = imgHeight || pdfImage?.height || 600;
+    const width = imgWidth || pageImage?.width || 800;
+    const height = imgHeight || pageImage?.height || 600;
     
     const scaleX = containerWidth / width;
     const scaleY = containerHeight / height;
@@ -1021,14 +1008,14 @@ export default function EditorPage() {
             onTouchEnd={handleMouseUp as any}
           >
             <Layer>
-              {pdfImage && (
+              {pageImage && (
                 <Rect
                   id="pdf-image"
                   x={0}
                   y={0}
-                  width={pdfImage.width}
-                  height={pdfImage.height}
-                  fillPatternImage={pdfImage}
+                  width={pageImage.width}
+                  height={pageImage.height}
+                  fillPatternImage={pageImage}
                   listening={false}
                 />
               )}

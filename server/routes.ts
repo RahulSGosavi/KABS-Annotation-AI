@@ -5,7 +5,36 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import bcrypt from "bcryptjs";
+import { exec } from "child_process";
+import { promisify } from "util";
 import { annotationLoginSchema, annotationSignupSchema } from "@shared/schema";
+
+const execAsync = promisify(exec);
+
+async function convertPdfToImages(pdfPath: string, outputDir: string): Promise<{ pageCount: number; pages: { pageNumber: number; imagePath: string; width: number; height: number }[] }> {
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  const outputPrefix = path.join(outputDir, 'page');
+  
+  try {
+    await execAsync(`pdftoppm -png -r 150 "${pdfPath}" "${outputPrefix}"`);
+    
+    const files = fs.readdirSync(outputDir).filter(f => f.startsWith('page-') && f.endsWith('.png')).sort();
+    const pages = files.map((file, index) => ({
+      pageNumber: index + 1,
+      imagePath: path.join(outputDir, file),
+      width: 0,
+      height: 0,
+    }));
+    
+    return { pageCount: pages.length, pages };
+  } catch (error) {
+    console.error('PDF conversion error:', error);
+    throw new Error('Failed to convert PDF to images');
+  }
+}
 
 // Configure multer for PDF uploads
 const uploadDir = path.join(process.cwd(), 'uploads');
@@ -40,12 +69,18 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   
-  // Serve uploaded files
-  // Note: For production, add proper authentication/signed URLs
+  // Serve uploaded files (PDFs and images)
   app.use('/uploads', (req, res, next) => {
     const filePath = path.join(uploadDir, req.path);
     if (fs.existsSync(filePath)) {
-      res.setHeader('Content-Type', 'application/pdf');
+      const ext = path.extname(filePath).toLowerCase();
+      if (ext === '.pdf') {
+        res.setHeader('Content-Type', 'application/pdf');
+      } else if (ext === '.png') {
+        res.setHeader('Content-Type', 'image/png');
+      } else if (ext === '.jpg' || ext === '.jpeg') {
+        res.setHeader('Content-Type', 'image/jpeg');
+      }
       res.sendFile(filePath);
     } else {
       res.status(404).json({ message: 'File not found' });
@@ -150,13 +185,35 @@ export async function registerRoutes(
       }
 
       const pdfUrl = `/uploads/${file.filename}`;
+      const pdfPath = path.join(uploadDir, file.filename);
+      const projectId = `proj-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      const pagesDir = path.join(uploadDir, projectId, 'pages');
+      
+      let pageCount = 1;
+      try {
+        const result = await convertPdfToImages(pdfPath, pagesDir);
+        pageCount = result.pageCount || 1;
+      } catch (conversionError) {
+        console.error('PDF conversion failed, defaulting to 1 page:', conversionError);
+      }
       
       const project = await storage.createProject({
         name,
         userId,
         pdfUrl,
-        pdfPageCount: "1", // Will be updated when PDF is loaded
+        pdfPageCount: String(pageCount),
       });
+
+      if (pageCount > 0) {
+        const newPagesDir = path.join(uploadDir, project.id, 'pages');
+        if (fs.existsSync(pagesDir)) {
+          fs.renameSync(pagesDir, newPagesDir);
+          const projectDir = path.join(uploadDir, projectId);
+          if (fs.existsSync(projectDir)) {
+            fs.rmdirSync(projectDir, { recursive: true });
+          }
+        }
+      }
 
       res.json(project);
     } catch (error) {
@@ -232,6 +289,66 @@ export async function registerRoutes(
       res.json(annotation);
     } catch (error) {
       console.error('Save annotation error:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  });
+
+  // Get page image URL for a project
+  app.get('/api/projects/:id/pages/:pageNumber', async (req, res) => {
+    try {
+      const { id, pageNumber } = req.params;
+      const project = await storage.getProject(id);
+      
+      if (!project) {
+        return res.status(404).json({ message: 'Project not found' });
+      }
+      
+      const pagesDir = path.join(uploadDir, id, 'pages');
+      
+      if (!fs.existsSync(pagesDir)) {
+        return res.status(404).json({ message: 'Page images not found' });
+      }
+      
+      const files = fs.readdirSync(pagesDir).filter(f => f.endsWith('.png')).sort();
+      const pageIndex = parseInt(pageNumber) - 1;
+      
+      if (pageIndex < 0 || pageIndex >= files.length) {
+        return res.status(404).json({ message: 'Page not found' });
+      }
+      
+      const imageUrl = `/uploads/${id}/pages/${files[pageIndex]}`;
+      res.json({ imageUrl, pageNumber: parseInt(pageNumber), totalPages: files.length });
+    } catch (error) {
+      console.error('Get page error:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  });
+
+  // Get all page images for a project
+  app.get('/api/projects/:id/pages', async (req, res) => {
+    try {
+      const { id } = req.params;
+      const project = await storage.getProject(id);
+      
+      if (!project) {
+        return res.status(404).json({ message: 'Project not found' });
+      }
+      
+      const pagesDir = path.join(uploadDir, id, 'pages');
+      
+      if (!fs.existsSync(pagesDir)) {
+        return res.json({ pages: [], totalPages: 0 });
+      }
+      
+      const files = fs.readdirSync(pagesDir).filter(f => f.endsWith('.png')).sort();
+      const pages = files.map((file, index) => ({
+        pageNumber: index + 1,
+        imageUrl: `/uploads/${id}/pages/${file}`,
+      }));
+      
+      res.json({ pages, totalPages: pages.length });
+    } catch (error) {
+      console.error('Get pages error:', error);
       res.status(500).json({ message: 'Internal server error' });
     }
   });
