@@ -225,7 +225,8 @@ export default function EditorPage() {
         await page.render({
           canvasContext: context,
           viewport: viewport,
-        }).promise;
+          canvas: canvas,
+        } as any).promise;
         
         const img = new Image();
         img.src = canvas.toDataURL();
@@ -1015,9 +1016,9 @@ export default function EditorPage() {
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
-            onTouchStart={handleMouseDown}
-            onTouchMove={handleMouseMove}
-            onTouchEnd={handleMouseUp}
+            onTouchStart={handleMouseDown as any}
+            onTouchMove={handleMouseMove as any}
+            onTouchEnd={handleMouseUp as any}
           >
             <Layer>
               {pdfImage && (
