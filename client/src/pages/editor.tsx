@@ -634,7 +634,12 @@ export default function EditorPage() {
     if (!pos) return;
 
     if (activeTool === 'freehand') {
-      setCurrentPoints([...currentPoints, pos.x, pos.y]);
+      const lastX = currentPoints[currentPoints.length - 2];
+      const lastY = currentPoints[currentPoints.length - 1];
+      const dist = Math.sqrt(Math.pow(pos.x - lastX, 2) + Math.pow(pos.y - lastY, 2));
+      if (dist > 3) {
+        setCurrentPoints([...currentPoints, pos.x, pos.y]);
+      }
     } else {
       const newPoints = [...currentPoints];
       newPoints[2] = pos.x;
@@ -1009,9 +1014,24 @@ export default function EditorPage() {
                   ctx.lineTo(ax2, ay2);
                   ctx.lineTo(ax3, ay3);
                   ctx.stroke();
-                  ctx.font = '14px sans-serif';
-                  ctx.fillStyle = shape.strokeColor || '#000';
-                  ctx.fillText(`${(shape.angleValue || 0).toFixed(1)}°`, ax2 + 10, ay2 - 10);
+                  
+                  const angle1 = Math.atan2(ay1 - ay2, ax1 - ax2);
+                  const angle2 = Math.atan2(ay3 - ay2, ax3 - ax2);
+                  const startAngle = Math.min(angle1, angle2);
+                  let sweepAngle = Math.abs(angle2 - angle1);
+                  if (sweepAngle > Math.PI) sweepAngle = 2 * Math.PI - sweepAngle;
+                  ctx.beginPath();
+                  ctx.arc(ax2, ay2, 25, startAngle, startAngle + sweepAngle);
+                  ctx.stroke();
+                  
+                  ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                  ctx.beginPath();
+                  ctx.roundRect(ax2 + 30, ay2 - 22, 60, 24, 4);
+                  ctx.fill();
+                  
+                  ctx.font = 'bold 16px JetBrains Mono, monospace';
+                  ctx.fillStyle = '#ffffff';
+                  ctx.fillText(`${(shape.angleValue || 0).toFixed(1)}°`, ax2 + 35, ay2 - 4);
                 }
                 break;
             }
@@ -1345,13 +1365,23 @@ export default function EditorPage() {
               strokeWidth={1}
               listening={false}
             />
+            <Rect
+              x={x2 + 30}
+              y={y2 - 22}
+              width={60}
+              height={24}
+              fill="rgba(0, 0, 0, 0.75)"
+              cornerRadius={4}
+              listening={false}
+            />
             <Text
               x={x2 + 35}
-              y={y2 - 10}
+              y={y2 - 18}
               text={`${angleDeg.toFixed(1)}°`}
-              fontSize={14}
-              fill={shape.strokeColor}
+              fontSize={16}
+              fill="#ffffff"
               fontFamily="JetBrains Mono, monospace"
+              fontStyle="bold"
               listening={false}
             />
           </Group>
