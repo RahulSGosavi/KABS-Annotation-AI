@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useParams } from 'wouter';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Stage, Layer, Rect, Circle, Line, Arrow, Text, Transformer, Image } from 'react-konva';
+import { Stage, Layer, Rect, Circle, Line, Arrow, Text, Transformer, Arc, Group } from 'react-konva';
 import { useAuth } from '@/lib/auth-context';
 import { queryClient } from '@/lib/queryClient';
 import { Button } from '@/components/ui/button';
@@ -48,9 +48,14 @@ import {
   Eye,
   EyeOff,
   Trash2,
-  GripVertical,
+  ArrowUp,
+  ArrowDown,
   Cloud,
   Loader2,
+  Menu,
+  X,
+  PanelRightClose,
+  PanelRightOpen,
 } from 'lucide-react';
 import type { Project, AnnotationShape, LayerData } from '@shared/schema';
 import Konva from 'konva';
@@ -75,6 +80,20 @@ const colorPresets = [
   '#3b82f6', '#8b5cf6', '#ec4899', '#ffffff', '#000000',
 ];
 
+const getToolIcon = (toolType: string) => {
+  switch (toolType) {
+    case 'freehand': return Pencil;
+    case 'line': return Minus;
+    case 'arrow': return ArrowRight;
+    case 'rect': return Square;
+    case 'circle': return CircleIcon;
+    case 'text': return Type;
+    case 'measurement': return Ruler;
+    case 'angle': return TriangleRight;
+    default: return Layers;
+  }
+};
+
 export default function EditorPage() {
   const params = useParams<{ id: string }>();
   const [, setLocation] = useLocation();
@@ -84,11 +103,13 @@ export default function EditorPage() {
   const stageRef = useRef<Konva.Stage>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const textEditRef = useRef<HTMLTextAreaElement>(null);
 
   const [activeTool, setActiveTool] = useState<Tool>('select');
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPoints, setCurrentPoints] = useState<number[]>([]);
+  const [anglePoints, setAnglePoints] = useState<number[]>([]);
   
   const [strokeColor, setStrokeColor] = useState('#3b82f6');
   const [fillColor, setFillColor] = useState('transparent');
@@ -117,6 +138,14 @@ export default function EditorPage() {
   
   const [autoSaveStatus, setAutoSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [showRightPanel, setShowRightPanel] = useState(true);
+  const [showToolbar, setShowToolbar] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
+
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const [editingTextValue, setEditingTextValue] = useState('');
+  const [textEditPosition, setTextEditPosition] = useState({ x: 0, y: 0 });
 
   const { data: project, isLoading: projectLoading } = useQuery<Project>({
     queryKey: ['/api/projects', params.id],
@@ -179,6 +208,18 @@ export default function EditorPage() {
       }
     }, 1000);
   }, [params.id, currentPage, layers, saveAnnotationsMutation]);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768);
+      if (window.innerWidth < 768) {
+        setShowRightPanel(false);
+      }
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   useEffect(() => {
     const loadPageImage = async () => {
@@ -271,17 +312,30 @@ export default function EditorPage() {
   useEffect(() => {
     const updateSize = () => {
       if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
         setStageSize({
-          width: containerRef.current.offsetWidth,
-          height: containerRef.current.offsetHeight,
+          width: rect.width,
+          height: rect.height,
         });
       }
     };
 
     updateSize();
+    const resizeObserver = new ResizeObserver(updateSize);
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
     window.addEventListener('resize', updateSize);
-    return () => window.removeEventListener('resize', updateSize);
-  }, []);
+    window.addEventListener('orientationchange', () => {
+      setTimeout(updateSize, 100);
+    });
+    
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateSize);
+      window.removeEventListener('orientationchange', updateSize);
+    };
+  }, [showRightPanel, showToolbar]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -313,13 +367,19 @@ export default function EditorPage() {
           deleteShape(selectedShapeId);
         }
       }
+
+      if (e.key === 'Escape') {
+        setSelectedShapeId(null);
+        setEditingTextId(null);
+        transformerRef.current?.nodes([]);
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedShapeId]);
 
-  const fitToScreen = (imgWidth?: number, imgHeight?: number) => {
+  const fitToScreen = useCallback((imgWidth?: number, imgHeight?: number) => {
     if (!containerRef.current) return;
     
     const containerWidth = containerRef.current.offsetWidth;
@@ -329,14 +389,14 @@ export default function EditorPage() {
     
     const scaleX = containerWidth / width;
     const scaleY = containerHeight / height;
-    const newZoom = Math.min(scaleX, scaleY) * 0.9;
+    const newZoom = Math.min(scaleX, scaleY) * 0.85;
     
     setZoom(newZoom);
     setStagePosition({
       x: (containerWidth - width * newZoom) / 2,
       y: (containerHeight - height * newZoom) / 2,
     });
-  };
+  }, [pageImage]);
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
@@ -431,7 +491,54 @@ export default function EditorPage() {
     triggerAutoSave();
   };
 
-  const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+  const toggleShapeVisibility = (shapeId: string) => {
+    const newLayers = layers.map(layer => ({
+      ...layer,
+      shapes: layer.shapes.map(shape => 
+        shape.id === shapeId ? { ...shape, visible: !shape.visible } : shape
+      ),
+    }));
+    setLayers(newLayers);
+    triggerAutoSave();
+  };
+
+  const moveShapeInLayer = (shapeId: string, direction: 'up' | 'down') => {
+    const newLayers = layers.map(layer => {
+      const shapeIndex = layer.shapes.findIndex(s => s.id === shapeId);
+      if (shapeIndex === -1) return layer;
+      
+      const newShapes = [...layer.shapes];
+      const targetIndex = direction === 'up' ? shapeIndex + 1 : shapeIndex - 1;
+      
+      if (targetIndex < 0 || targetIndex >= newShapes.length) return layer;
+      
+      [newShapes[shapeIndex], newShapes[targetIndex]] = [newShapes[targetIndex], newShapes[shapeIndex]];
+      return { ...layer, shapes: newShapes };
+    });
+    setLayers(newLayers);
+    addToHistory(newLayers);
+    triggerAutoSave();
+  };
+
+  const getPointerPosition = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
+    const stage = e.target.getStage();
+    if (!stage) return null;
+    
+    const pos = stage.getPointerPosition();
+    if (!pos) return null;
+    
+    return {
+      x: (pos.x - stagePosition.x) / zoom,
+      y: (pos.y - stagePosition.y) / zoom,
+    };
+  };
+
+  const handlePointerDown = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
+    if (editingTextId) {
+      finishTextEditing();
+      return;
+    }
+
     if (activeTool === 'select') {
       const clickedOnEmpty = e.target === e.target.getStage();
       if (clickedOnEmpty) {
@@ -449,44 +556,64 @@ export default function EditorPage() {
       return;
     }
 
-    setIsDrawing(true);
-    const pos = e.target.getStage()?.getPointerPosition();
+    const pos = getPointerPosition(e);
     if (!pos) return;
 
-    const adjustedPos = {
-      x: (pos.x - stagePosition.x) / zoom,
-      y: (pos.y - stagePosition.y) / zoom,
-    };
+    if (activeTool === 'angle') {
+      if (anglePoints.length < 4) {
+        setAnglePoints([...anglePoints, pos.x, pos.y]);
+      } else {
+        setAnglePoints([pos.x, pos.y]);
+      }
+      return;
+    }
+
+    setIsDrawing(true);
 
     if (activeTool === 'freehand') {
-      setCurrentPoints([adjustedPos.x, adjustedPos.y]);
+      setCurrentPoints([pos.x, pos.y]);
+    } else if (activeTool === 'text') {
+      const shape: AnnotationShape = {
+        id: generateId(),
+        type: 'text',
+        x: pos.x,
+        y: pos.y,
+        text: 'Double-click to edit',
+        fontSize: 16,
+        strokeColor,
+        fillColor,
+        strokeWidth,
+        opacity: opacity / 100,
+        lineStyle,
+        visible: true,
+        locked: false,
+        name: `text ${Date.now()}`,
+      };
+      addShape(shape);
+      setIsDrawing(false);
+      setSelectedShapeId(shape.id);
     } else {
-      setCurrentPoints([adjustedPos.x, adjustedPos.y, adjustedPos.x, adjustedPos.y]);
+      setCurrentPoints([pos.x, pos.y, pos.x, pos.y]);
     }
   };
 
-  const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+  const handlePointerMove = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
     if (!isDrawing) return;
 
-    const pos = e.target.getStage()?.getPointerPosition();
+    const pos = getPointerPosition(e);
     if (!pos) return;
 
-    const adjustedPos = {
-      x: (pos.x - stagePosition.x) / zoom,
-      y: (pos.y - stagePosition.y) / zoom,
-    };
-
     if (activeTool === 'freehand') {
-      setCurrentPoints([...currentPoints, adjustedPos.x, adjustedPos.y]);
+      setCurrentPoints([...currentPoints, pos.x, pos.y]);
     } else {
       const newPoints = [...currentPoints];
-      newPoints[2] = adjustedPos.x;
-      newPoints[3] = adjustedPos.y;
+      newPoints[2] = pos.x;
+      newPoints[3] = pos.y;
       setCurrentPoints(newPoints);
     }
   };
 
-  const handleMouseUp = () => {
+  const handlePointerUp = () => {
     if (!isDrawing || currentPoints.length < 4) {
       setIsDrawing(false);
       setCurrentPoints([]);
@@ -575,25 +702,6 @@ export default function EditorPage() {
           measurementUnit,
         };
         break;
-      case 'angle':
-        shape = {
-          ...baseShape,
-          type: 'angle',
-          x: 0,
-          y: 0,
-          points: currentPoints,
-        };
-        break;
-      case 'text':
-        shape = {
-          ...baseShape,
-          type: 'text',
-          x: currentPoints[0],
-          y: currentPoints[1],
-          text: 'Double click to edit',
-          fontSize: 16,
-        };
-        break;
     }
 
     if (shape) {
@@ -604,7 +712,48 @@ export default function EditorPage() {
     setCurrentPoints([]);
   };
 
-  const handleShapeClick = (shapeId: string, e: Konva.KonvaEventObject<MouseEvent>) => {
+  useEffect(() => {
+    if (anglePoints.length === 6) {
+      const [x1, y1, x2, y2, x3, y3] = anglePoints;
+      
+      const v1x = x1 - x2;
+      const v1y = y1 - y2;
+      const v2x = x3 - x2;
+      const v2y = y3 - y2;
+      
+      const dot = v1x * v2x + v1y * v2y;
+      const mag1 = Math.sqrt(v1x * v1x + v1y * v1y);
+      const mag2 = Math.sqrt(v2x * v2x + v2y * v2y);
+      
+      let angleDegrees = 0;
+      if (mag1 > 0 && mag2 > 0) {
+        const cosAngle = dot / (mag1 * mag2);
+        angleDegrees = Math.acos(Math.max(-1, Math.min(1, cosAngle))) * (180 / Math.PI);
+      }
+
+      const shape: AnnotationShape = {
+        id: generateId(),
+        type: 'angle',
+        x: x2,
+        y: y2,
+        points: anglePoints,
+        angleValue: angleDegrees,
+        strokeColor,
+        fillColor,
+        strokeWidth,
+        opacity: opacity / 100,
+        lineStyle,
+        visible: true,
+        locked: false,
+        name: `angle ${Date.now()}`,
+      };
+      
+      addShape(shape);
+      setAnglePoints([]);
+    }
+  }, [anglePoints, strokeColor, fillColor, strokeWidth, opacity, lineStyle]);
+
+  const handleShapeClick = (shapeId: string, e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
     if (activeTool === 'eraser') {
       deleteShape(shapeId);
       return;
@@ -615,6 +764,41 @@ export default function EditorPage() {
       const shape = e.target;
       transformerRef.current?.nodes([shape]);
     }
+  };
+
+  const handleTextDblClick = (shapeId: string, e: Konva.KonvaEventObject<MouseEvent>) => {
+    const textNode = e.target as Konva.Text;
+    const shape = layers.flatMap(l => l.shapes).find(s => s.id === shapeId);
+    if (!shape || shape.type !== 'text') return;
+
+    setEditingTextId(shapeId);
+    setEditingTextValue(shape.text || '');
+
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const textPosition = textNode.getAbsolutePosition();
+    const stageBox = stage.container().getBoundingClientRect();
+
+    setTextEditPosition({
+      x: stageBox.left + textPosition.x,
+      y: stageBox.top + textPosition.y,
+    });
+
+    transformerRef.current?.nodes([]);
+    
+    setTimeout(() => {
+      textEditRef.current?.focus();
+      textEditRef.current?.select();
+    }, 0);
+  };
+
+  const finishTextEditing = () => {
+    if (editingTextId && editingTextValue.trim()) {
+      updateShape(editingTextId, { text: editingTextValue });
+    }
+    setEditingTextId(null);
+    setEditingTextValue('');
   };
 
   const handleLogout = () => {
@@ -628,11 +812,142 @@ export default function EditorPage() {
     }
   };
 
+  const handleExportCurrentPage = async () => {
+    if (!stageRef.current || !pageImage) {
+      toast({
+        title: 'Export failed',
+        description: 'No content to export.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      transformerRef.current?.nodes([]);
+      
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      const stage = stageRef.current;
+      const originalScale = { x: stage.scaleX(), y: stage.scaleY() };
+      const originalPosition = { x: stage.x(), y: stage.y() };
+      
+      stage.scale({ x: 1, y: 1 });
+      stage.position({ x: 0, y: 0 });
+      
+      const dataURL = stage.toDataURL({
+        mimeType: 'image/png',
+        quality: 1,
+        pixelRatio: 2,
+        x: 0,
+        y: 0,
+        width: pageImage.width,
+        height: pageImage.height,
+      });
+      
+      stage.scale(originalScale);
+      stage.position(originalPosition);
+      
+      const link = document.createElement('a');
+      link.download = `${project?.name || 'annotation'}-page-${currentPage}.png`;
+      link.href = dataURL;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      toast({
+        title: 'Export successful',
+        description: `Page ${currentPage} exported as PNG.`,
+      });
+    } catch (error) {
+      console.error('Export failed:', error);
+      toast({
+        title: 'Export failed',
+        description: 'Failed to export the annotation. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleExportAllPages = async () => {
+    if (!params.id) {
+      toast({
+        title: 'Export failed',
+        description: 'No project to export.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      toast({
+        title: 'Exporting...',
+        description: 'Preparing PDF export. This may take a moment.',
+      });
+
+      const { jsPDF } = await import('jspdf');
+      const pdf = new jsPDF('landscape', 'pt', 'letter');
+      
+      for (let page = 1; page <= totalPages; page++) {
+        const imgResponse = await fetch(`/api/projects/${params.id}/pages/${page}`);
+        const imgData = await imgResponse.json();
+        
+        if (imgData.imageUrl) {
+          const img = new window.Image();
+          img.crossOrigin = 'anonymous';
+          
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('Failed to load image'));
+            img.src = imgData.imageUrl;
+          });
+
+          const pageWidth = pdf.internal.pageSize.getWidth();
+          const pageHeight = pdf.internal.pageSize.getHeight();
+          
+          const scale = Math.min(pageWidth / img.width, pageHeight / img.height) * 0.95;
+          const scaledWidth = img.width * scale;
+          const scaledHeight = img.height * scale;
+          const x = (pageWidth - scaledWidth) / 2;
+          const y = (pageHeight - scaledHeight) / 2;
+
+          if (page > 1) {
+            pdf.addPage();
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0);
+            const imageData = canvas.toDataURL('image/jpeg', 0.9);
+            pdf.addImage(imageData, 'JPEG', x, y, scaledWidth, scaledHeight);
+          }
+        }
+      }
+
+      pdf.save(`${project?.name || 'annotation'}-all-pages.pdf`);
+
+      toast({
+        title: 'Export successful',
+        description: `All ${totalPages} pages exported as PDF.`,
+      });
+    } catch (error) {
+      console.error('Export failed:', error);
+      toast({
+        title: 'Export failed',
+        description: 'Failed to export PDF. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  };
+
   const toggleLayerVisibility = (layerId: string) => {
     const newLayers = layers.map(layer => 
       layer.id === layerId ? { ...layer, visible: !layer.visible } : layer
     );
     setLayers(newLayers);
+    triggerAutoSave();
   };
 
   const getLineStyleDash = (style: string): number[] => {
@@ -643,25 +958,38 @@ export default function EditorPage() {
     }
   };
 
+  const getAllShapes = () => {
+    return layers
+      .filter(layer => layer.type !== 'pdf')
+      .flatMap(layer => layer.shapes.map(shape => ({ ...shape, layerId: layer.id })));
+  };
+
   const renderShape = (shape: AnnotationShape) => {
     const commonProps = {
-      key: shape.id,
       id: shape.id,
       opacity: shape.opacity,
       visible: shape.visible,
       draggable: activeTool === 'select' && !shape.locked,
       onClick: (e: Konva.KonvaEventObject<MouseEvent>) => handleShapeClick(shape.id, e),
-      onTap: (e: Konva.KonvaEventObject<TouchEvent>) => handleShapeClick(shape.id, e as any),
+      onTap: (e: Konva.KonvaEventObject<TouchEvent>) => handleShapeClick(shape.id, e),
       onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => {
         updateShape(shape.id, { x: e.target.x(), y: e.target.y() });
       },
       onTransformEnd: (e: Konva.KonvaEventObject<Event>) => {
         const node = e.target;
+        const scaleX = node.scaleX();
+        const scaleY = node.scaleY();
+        
+        node.scaleX(1);
+        node.scaleY(1);
+        
         updateShape(shape.id, {
           x: node.x(),
           y: node.y(),
-          scaleX: node.scaleX(),
-          scaleY: node.scaleY(),
+          width: Math.max(5, (shape.width || 0) * scaleX),
+          height: Math.max(5, (shape.height || 0) * scaleY),
+          radius: shape.radius ? Math.max(5, shape.radius * Math.max(scaleX, scaleY)) : undefined,
+          fontSize: shape.fontSize ? Math.max(8, (shape.fontSize || 16) * scaleY) : undefined,
           rotation: node.rotation(),
         });
       },
@@ -671,6 +999,7 @@ export default function EditorPage() {
       case 'rect':
         return (
           <Rect
+            key={shape.id}
             {...commonProps}
             x={shape.x}
             y={shape.y}
@@ -685,6 +1014,7 @@ export default function EditorPage() {
       case 'circle':
         return (
           <Circle
+            key={shape.id}
             {...commonProps}
             x={shape.x}
             y={shape.y}
@@ -699,6 +1029,7 @@ export default function EditorPage() {
       case 'freehand':
         return (
           <Line
+            key={shape.id}
             {...commonProps}
             points={shape.points}
             stroke={shape.strokeColor}
@@ -712,6 +1043,7 @@ export default function EditorPage() {
       case 'arrow':
         return (
           <Arrow
+            key={shape.id}
             {...commonProps}
             points={shape.points || []}
             stroke={shape.strokeColor}
@@ -724,13 +1056,16 @@ export default function EditorPage() {
       case 'text':
         return (
           <Text
+            key={shape.id}
             {...commonProps}
             x={shape.x}
             y={shape.y}
-            text={shape.text || 'Text'}
+            text={editingTextId === shape.id ? '' : (shape.text || 'Text')}
             fontSize={shape.fontSize || 16}
             fill={shape.strokeColor}
             fontFamily="Inter, sans-serif"
+            onDblClick={(e) => handleTextDblClick(shape.id, e)}
+            onDblTap={(e) => handleTextDblClick(shape.id, e as any)}
           />
         );
       case 'measurement':
@@ -744,7 +1079,7 @@ export default function EditorPage() {
         const displayValue = (distance / 10).toFixed(1);
         
         return (
-          <>
+          <Group key={shape.id}>
             <Line
               {...commonProps}
               points={points}
@@ -753,16 +1088,65 @@ export default function EditorPage() {
               dash={[5, 5]}
             />
             <Text
-              key={`${shape.id}-label`}
-              x={midX}
+              x={midX - 30}
               y={midY - 20}
               text={`${displayValue} ${unitLabel}`}
               fontSize={14}
               fill={shape.strokeColor}
               fontFamily="JetBrains Mono, monospace"
               align="center"
+              listening={false}
             />
-          </>
+          </Group>
+        );
+      case 'angle':
+        if (!shape.points || shape.points.length < 6) return null;
+        const [x1, y1, x2, y2, x3, y3] = shape.points;
+        const angleDeg = shape.angleValue || 0;
+        
+        const angle1 = Math.atan2(y1 - y2, x1 - x2);
+        const angle2 = Math.atan2(y3 - y2, x3 - x2);
+        
+        const startAngle = Math.min(angle1, angle2);
+        const endAngle = Math.max(angle1, angle2);
+        let sweepAngle = endAngle - startAngle;
+        if (sweepAngle > Math.PI) sweepAngle = 2 * Math.PI - sweepAngle;
+        
+        return (
+          <Group key={shape.id}>
+            <Line
+              {...commonProps}
+              points={[x1, y1, x2, y2]}
+              stroke={shape.strokeColor}
+              strokeWidth={shape.strokeWidth}
+            />
+            <Line
+              points={[x2, y2, x3, y3]}
+              stroke={shape.strokeColor}
+              strokeWidth={shape.strokeWidth}
+              listening={false}
+            />
+            <Arc
+              x={x2}
+              y={y2}
+              innerRadius={25}
+              outerRadius={25}
+              angle={sweepAngle * (180 / Math.PI)}
+              rotation={startAngle * (180 / Math.PI)}
+              stroke={shape.strokeColor}
+              strokeWidth={1}
+              listening={false}
+            />
+            <Text
+              x={x2 + 35}
+              y={y2 - 10}
+              text={`${angleDeg.toFixed(1)}°`}
+              fontSize={14}
+              fill={shape.strokeColor}
+              fontFamily="JetBrains Mono, monospace"
+              listening={false}
+            />
+          </Group>
         );
       default:
         return null;
@@ -839,7 +1223,7 @@ export default function EditorPage() {
           <>
             <Line points={currentPoints} {...previewProps} dash={[5, 5]} />
             <Text
-              x={midX}
+              x={midX - 30}
               y={midY - 20}
               text={`${(dist / 10).toFixed(1)} ${measurementUnit}`}
               fontSize={14}
@@ -854,6 +1238,49 @@ export default function EditorPage() {
     }
   };
 
+  const renderAnglePreview = () => {
+    if (anglePoints.length < 2) return null;
+
+    const previewProps = {
+      stroke: strokeColor,
+      strokeWidth,
+      opacity: opacity / 100,
+      listening: false,
+    };
+
+    if (anglePoints.length === 2) {
+      return (
+        <Circle
+          x={anglePoints[0]}
+          y={anglePoints[1]}
+          radius={5}
+          fill={strokeColor}
+          {...previewProps}
+        />
+      );
+    }
+
+    if (anglePoints.length === 4) {
+      return (
+        <>
+          <Line
+            points={[anglePoints[0], anglePoints[1], anglePoints[2], anglePoints[3]]}
+            {...previewProps}
+          />
+          <Circle
+            x={anglePoints[2]}
+            y={anglePoints[3]}
+            radius={5}
+            fill={strokeColor}
+            listening={false}
+          />
+        </>
+      );
+    }
+
+    return null;
+  };
+
   if (projectLoading) {
     return (
       <div className="h-screen flex items-center justify-center bg-background">
@@ -864,8 +1291,8 @@ export default function EditorPage() {
 
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">
-      <header className="h-14 border-b border-border flex items-center justify-between px-4 shrink-0 bg-background">
-        <div className="flex items-center gap-3">
+      <header className="h-12 md:h-14 border-b border-border flex items-center justify-between px-2 md:px-4 shrink-0 bg-background">
+        <div className="flex items-center gap-2 md:gap-3 min-w-0">
           <Button
             variant="ghost"
             size="icon"
@@ -874,75 +1301,154 @@ export default function EditorPage() {
           >
             <ChevronLeft className="h-5 w-5" />
           </Button>
-          <div className="p-1.5 bg-primary rounded-md">
+          
+          {isMobile && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setShowToolbar(!showToolbar)}
+              data-testid="button-toggle-toolbar"
+            >
+              {showToolbar ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </Button>
+          )}
+          
+          <div className="hidden md:flex p-1.5 bg-primary rounded-md">
             <Layers className="w-4 h-4 text-primary-foreground" />
           </div>
-          <span className="font-medium text-foreground text-sm">{project?.name || 'Untitled'}</span>
+          <span className="font-medium text-foreground text-sm truncate max-w-[120px] md:max-w-none">
+            {project?.name || 'Untitled'}
+          </span>
           
-          <div className="flex items-center gap-1 ml-4 text-xs text-muted-foreground">
+          <div className="hidden sm:flex items-center gap-1 ml-2 md:ml-4 text-xs text-muted-foreground">
             {autoSaveStatus === 'saving' ? (
               <>
                 <Loader2 className="w-3 h-3 animate-spin" />
-                <span>Saving...</span>
+                <span className="hidden md:inline">Saving...</span>
               </>
             ) : autoSaveStatus === 'saved' ? (
               <>
                 <Cloud className="w-3 h-3 text-green-500" />
-                <span>Auto-saved</span>
+                <span className="hidden md:inline">Auto-saved</span>
               </>
             ) : (
               <>
                 <Cloud className="w-3 h-3 text-yellow-500" />
-                <span>Unsaved</span>
+                <span className="hidden md:inline">Unsaved</span>
               </>
             )}
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={undo}
-            disabled={historyIndex <= 0}
-            data-testid="button-undo"
-          >
-            <Undo2 className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={redo}
-            disabled={historyIndex >= history.length - 1}
-            data-testid="button-redo"
-          >
-            <Redo2 className="h-4 w-4" />
-          </Button>
+        <div className="flex items-center gap-1 md:gap-2">
+          <div className="hidden sm:flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={undo}
+              disabled={historyIndex <= 0}
+              data-testid="button-undo"
+            >
+              <Undo2 className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={redo}
+              disabled={historyIndex >= history.length - 1}
+              data-testid="button-redo"
+            >
+              <Redo2 className="h-4 w-4" />
+            </Button>
+          </div>
           
-          <Separator orientation="vertical" className="h-6 mx-2" />
+          <Separator orientation="vertical" className="h-6 mx-1 md:mx-2 hidden sm:block" />
           
           <Button
             variant="outline"
             size="sm"
             onClick={handleSaveProject}
             disabled={saveProjectMutation.isPending}
+            className="hidden md:flex"
             data-testid="button-save"
           >
             <Save className="h-4 w-4 mr-2" />
             Save Project
           </Button>
           
-          <Button variant="outline" size="sm" data-testid="button-export">
-            <Download className="h-4 w-4 mr-2" />
-            Export
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleSaveProject}
+            disabled={saveProjectMutation.isPending}
+            className="md:hidden"
+            data-testid="button-save-mobile"
+          >
+            <Save className="h-4 w-4" />
           </Button>
-          
-          <Separator orientation="vertical" className="h-6 mx-2" />
           
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="gap-2" data-testid="button-user-menu">
-                <span className="text-sm">Hello, {user?.name}</span>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="hidden md:flex gap-1"
+                data-testid="button-export"
+              >
+                <Download className="h-4 w-4" />
+                Export
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleExportCurrentPage} data-testid="button-export-png">
+                <Download className="mr-2 h-4 w-4" />
+                Current Page (PNG)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleExportAllPages} data-testid="button-export-pdf">
+                <Download className="mr-2 h-4 w-4" />
+                All Pages (PDF)
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                className="md:hidden"
+                data-testid="button-export-mobile"
+              >
+                <Download className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleExportCurrentPage}>
+                Current Page (PNG)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleExportAllPages}>
+                All Pages (PDF)
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          
+          <Separator orientation="vertical" className="h-6 mx-1 md:mx-2 hidden md:block" />
+          
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowRightPanel(!showRightPanel)}
+            className="hidden md:flex"
+            data-testid="button-toggle-panel"
+          >
+            {showRightPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          </Button>
+          
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm" className="gap-1 md:gap-2" data-testid="button-user-menu">
+                <span className="text-xs md:text-sm hidden sm:inline">Hello, {user?.name}</span>
                 <ChevronDown className="h-4 w-4 text-muted-foreground" />
               </Button>
             </DropdownMenuTrigger>
@@ -960,37 +1466,52 @@ export default function EditorPage() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
-        <aside className="w-16 border-r border-border bg-card shrink-0 flex flex-col py-2">
-          {tools.map((tool, index) => (
-            <div key={tool.id}>
-              {index === 7 && <Separator className="my-2" />}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={activeTool === tool.id ? 'secondary' : 'ghost'}
-                    size="icon"
-                    className="w-12 h-12 mx-auto my-0.5"
-                    onClick={() => setActiveTool(tool.id)}
-                    data-testid={`button-tool-${tool.id}`}
-                  >
-                    <tool.icon className="h-5 w-5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="right">
-                  <p>{tool.label}</p>
-                  <p className="text-xs text-muted-foreground">Shortcut: {tool.shortcut}</p>
-                </TooltipContent>
-              </Tooltip>
-            </div>
-          ))}
-        </aside>
+      <div className="flex-1 flex overflow-hidden relative">
+        {(showToolbar || !isMobile) && (
+          <aside className={`${isMobile ? 'absolute left-0 top-0 bottom-0 z-20 shadow-lg' : ''} w-14 md:w-16 border-r border-border bg-card shrink-0 flex flex-col py-2`}>
+            <ScrollArea className="flex-1">
+              <div className="flex flex-col">
+                {tools.map((tool, index) => (
+                  <div key={tool.id}>
+                    {index === 7 && <Separator className="my-2" />}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant={activeTool === tool.id ? 'secondary' : 'ghost'}
+                          size="icon"
+                          className="w-10 h-10 md:w-12 md:h-12 mx-auto my-0.5"
+                          onClick={() => {
+                            setActiveTool(tool.id);
+                            if (isMobile) setShowToolbar(false);
+                          }}
+                          data-testid={`button-tool-${tool.id}`}
+                        >
+                          <tool.icon className="h-4 w-4 md:h-5 md:w-5" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="right">
+                        <p>{tool.label}</p>
+                        <p className="text-xs text-muted-foreground">Shortcut: {tool.shortcut}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </aside>
+        )}
 
         <main 
           ref={containerRef}
           className="flex-1 relative overflow-hidden bg-muted/30"
-          style={{ cursor: activeTool === 'select' ? 'default' : 'crosshair' }}
+          style={{ cursor: activeTool === 'select' ? 'default' : activeTool === 'eraser' ? 'crosshair' : 'crosshair' }}
         >
+          {pageLoading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
+              <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            </div>
+          )}
+          
           <Stage
             ref={stageRef}
             width={stageSize.width}
@@ -1000,12 +1521,19 @@ export default function EditorPage() {
             scaleX={zoom}
             scaleY={zoom}
             onWheel={handleWheel}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onTouchStart={handleMouseDown as any}
-            onTouchMove={handleMouseMove as any}
-            onTouchEnd={handleMouseUp as any}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onTouchStart={handlePointerDown}
+            onTouchMove={handlePointerMove}
+            onTouchEnd={handlePointerUp}
+            draggable={activeTool === 'select' && !isDrawing}
+            onDragEnd={(e) => {
+              setStagePosition({
+                x: e.target.x(),
+                y: e.target.y(),
+              });
+            }}
           >
             <Layer>
               {pageImage && (
@@ -1023,32 +1551,81 @@ export default function EditorPage() {
             
             {layers.filter(layer => layer.visible && layer.type !== 'pdf').map(layer => (
               <Layer key={layer.id}>
-                {layer.shapes.map(renderShape)}
+                {layer.shapes.filter(s => s.visible).map(renderShape)}
               </Layer>
             ))}
             
             <Layer>
               {renderDrawingPreview()}
-              <Transformer ref={transformerRef} />
+              {renderAnglePreview()}
+              <Transformer 
+                ref={transformerRef}
+                boundBoxFunc={(oldBox, newBox) => {
+                  if (newBox.width < 5 || newBox.height < 5) {
+                    return oldBox;
+                  }
+                  return newBox;
+                }}
+              />
             </Layer>
           </Stage>
 
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-card border border-border rounded-md px-3 py-2 shadow-lg">
+          {editingTextId && (
+            <textarea
+              ref={textEditRef}
+              value={editingTextValue}
+              onChange={(e) => setEditingTextValue(e.target.value)}
+              onBlur={finishTextEditing}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  finishTextEditing();
+                }
+                if (e.key === 'Escape') {
+                  setEditingTextId(null);
+                  setEditingTextValue('');
+                }
+              }}
+              style={{
+                position: 'fixed',
+                left: textEditPosition.x,
+                top: textEditPosition.y,
+                fontSize: '16px',
+                padding: '4px 8px',
+                margin: 0,
+                border: '2px solid #3b82f6',
+                borderRadius: '4px',
+                background: 'white',
+                color: 'black',
+                resize: 'none',
+                outline: 'none',
+                minWidth: '150px',
+                minHeight: '40px',
+                zIndex: 1000,
+                fontFamily: 'Inter, sans-serif',
+              }}
+              data-testid="textarea-text-edit"
+            />
+          )}
+
+          <div className="absolute bottom-14 md:bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 md:gap-2 bg-card border border-border rounded-md px-2 md:px-3 py-1.5 md:py-2 shadow-lg z-10">
             <Button
               variant="ghost"
               size="icon"
+              className="h-8 w-8"
               onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
               disabled={currentPage <= 1}
               data-testid="button-prev-page"
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="text-sm font-mono min-w-[60px] text-center" data-testid="text-page-number">
+            <span className="text-xs md:text-sm font-mono min-w-[50px] md:min-w-[60px] text-center" data-testid="text-page-number">
               {currentPage} / {totalPages}
             </span>
             <Button
               variant="ghost"
               size="icon"
+              className="h-8 w-8"
               onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
               disabled={currentPage >= totalPages}
               data-testid="button-next-page"
@@ -1057,21 +1634,23 @@ export default function EditorPage() {
             </Button>
           </div>
 
-          <div className="absolute bottom-4 right-4 flex items-center gap-1 bg-card border border-border rounded-md p-1 shadow-lg">
+          <div className="absolute bottom-14 md:bottom-4 right-2 md:right-4 flex items-center gap-1 bg-card border border-border rounded-md p-1 shadow-lg z-10">
             <Button
               variant="ghost"
               size="icon"
+              className="h-8 w-8"
               onClick={() => setZoom(Math.max(0.1, zoom - 0.1))}
               data-testid="button-zoom-out"
             >
               <ZoomOut className="h-4 w-4" />
             </Button>
-            <span className="text-xs font-mono min-w-[50px] text-center" data-testid="text-zoom-level">
+            <span className="text-xs font-mono min-w-[40px] md:min-w-[50px] text-center" data-testid="text-zoom-level">
               {Math.round(zoom * 100)}%
             </span>
             <Button
               variant="ghost"
               size="icon"
+              className="h-8 w-8"
               onClick={() => setZoom(Math.min(5, zoom + 0.1))}
               data-testid="button-zoom-in"
             >
@@ -1080,188 +1659,279 @@ export default function EditorPage() {
             <Button
               variant="ghost"
               size="icon"
+              className="h-8 w-8"
               onClick={() => fitToScreen()}
               data-testid="button-fit-screen"
             >
               <Maximize className="h-4 w-4" />
             </Button>
           </div>
+
+          {isMobile && (
+            <div className="absolute bottom-2 left-2 right-2 flex items-center justify-center gap-2 z-10">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRightPanel(!showRightPanel)}
+                data-testid="button-toggle-panel-mobile"
+              >
+                {showRightPanel ? 'Hide Panel' : 'Properties'}
+              </Button>
+            </div>
+          )}
         </main>
 
-        <aside className="w-72 border-l border-border bg-card shrink-0 flex flex-col">
-          <Tabs defaultValue="properties" className="flex-1 flex flex-col">
-            <TabsList className="grid w-full grid-cols-2 rounded-none border-b border-border">
-              <TabsTrigger value="properties">Properties</TabsTrigger>
-              <TabsTrigger value="layers">Layers</TabsTrigger>
-            </TabsList>
-            
-            <TabsContent value="properties" className="flex-1 m-0">
-              <ScrollArea className="h-full">
-                <div className="p-4 space-y-6">
-                  <div className="space-y-3">
-                    <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                      Stroke Color
-                    </Label>
-                    <div className="flex flex-wrap gap-2">
-                      {colorPresets.map(color => (
-                        <button
-                          key={color}
-                          className={`w-7 h-7 rounded-md border-2 transition-all ${
-                            strokeColor === color ? 'border-primary scale-110' : 'border-transparent'
-                          }`}
-                          style={{ backgroundColor: color }}
-                          onClick={() => setStrokeColor(color)}
-                          data-testid={`button-stroke-color-${color}`}
-                        />
-                      ))}
-                    </div>
-                    <Input
-                      type="color"
-                      value={strokeColor}
-                      onChange={(e) => setStrokeColor(e.target.value)}
-                      className="w-full h-9"
-                      data-testid="input-stroke-color"
-                    />
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                      Fill Color
-                    </Label>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        className={`w-7 h-7 rounded-md border-2 transition-all bg-transparent ${
-                          fillColor === 'transparent' ? 'border-primary scale-110' : 'border-border'
-                        }`}
-                        onClick={() => setFillColor('transparent')}
-                        data-testid="button-fill-transparent"
-                      >
-                        <span className="text-xs">No</span>
-                      </button>
-                      {colorPresets.map(color => (
-                        <button
-                          key={color}
-                          className={`w-7 h-7 rounded-md border-2 transition-all ${
-                            fillColor === color ? 'border-primary scale-110' : 'border-transparent'
-                          }`}
-                          style={{ backgroundColor: color }}
-                          onClick={() => setFillColor(color)}
-                          data-testid={`button-fill-color-${color}`}
-                        />
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
+        {showRightPanel && (
+          <aside className={`${isMobile ? 'absolute right-0 top-0 bottom-0 z-20 shadow-lg' : ''} w-64 md:w-72 border-l border-border bg-card shrink-0 flex flex-col`}>
+            <Tabs defaultValue="properties" className="flex-1 flex flex-col min-h-0">
+              <TabsList className="grid w-full grid-cols-2 rounded-none border-b border-border shrink-0">
+                <TabsTrigger value="properties">Properties</TabsTrigger>
+                <TabsTrigger value="layers">Layers</TabsTrigger>
+              </TabsList>
+              
+              <TabsContent value="properties" className="flex-1 m-0 min-h-0">
+                <ScrollArea className="h-full">
+                  <div className="p-3 md:p-4 space-y-4 md:space-y-6">
+                    <div className="space-y-2 md:space-y-3">
                       <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                        Stroke Width
+                        Stroke Color
                       </Label>
-                      <span className="text-xs text-muted-foreground">{strokeWidth}px</span>
+                      <div className="flex flex-wrap gap-1.5 md:gap-2">
+                        {colorPresets.map(color => (
+                          <button
+                            key={color}
+                            className={`w-6 h-6 md:w-7 md:h-7 rounded-md border-2 transition-all ${
+                              strokeColor === color ? 'border-primary scale-110' : 'border-transparent'
+                            }`}
+                            style={{ backgroundColor: color }}
+                            onClick={() => setStrokeColor(color)}
+                            data-testid={`button-stroke-color-${color}`}
+                          />
+                        ))}
+                      </div>
+                      <Input
+                        type="color"
+                        value={strokeColor}
+                        onChange={(e) => setStrokeColor(e.target.value)}
+                        className="w-full h-8 md:h-9"
+                        data-testid="input-stroke-color"
+                      />
                     </div>
-                    <Slider
-                      value={[strokeWidth]}
-                      onValueChange={([value]) => setStrokeWidth(value)}
-                      min={1}
-                      max={20}
-                      step={1}
-                      data-testid="slider-stroke-width"
-                    />
-                  </div>
 
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
+                    <div className="space-y-2 md:space-y-3">
                       <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                        Opacity
+                        Fill Color
                       </Label>
-                      <span className="text-xs text-muted-foreground">{opacity}%</span>
+                      <div className="flex flex-wrap gap-1.5 md:gap-2">
+                        <button
+                          className={`w-6 h-6 md:w-7 md:h-7 rounded-md border-2 transition-all bg-transparent ${
+                            fillColor === 'transparent' ? 'border-primary scale-110' : 'border-border'
+                          }`}
+                          onClick={() => setFillColor('transparent')}
+                          data-testid="button-fill-transparent"
+                        >
+                          <span className="text-[10px] md:text-xs">No</span>
+                        </button>
+                        {colorPresets.map(color => (
+                          <button
+                            key={color}
+                            className={`w-6 h-6 md:w-7 md:h-7 rounded-md border-2 transition-all ${
+                              fillColor === color ? 'border-primary scale-110' : 'border-transparent'
+                            }`}
+                            style={{ backgroundColor: color }}
+                            onClick={() => setFillColor(color)}
+                            data-testid={`button-fill-color-${color}`}
+                          />
+                        ))}
+                      </div>
                     </div>
-                    <Slider
-                      value={[opacity]}
-                      onValueChange={([value]) => setOpacity(value)}
-                      min={10}
-                      max={100}
-                      step={5}
-                      data-testid="slider-opacity"
-                    />
-                  </div>
 
-                  <div className="space-y-3">
-                    <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                      Line Style
-                    </Label>
-                    <Select value={lineStyle} onValueChange={(v) => setLineStyle(v as any)}>
-                      <SelectTrigger data-testid="select-line-style">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="solid">Solid</SelectItem>
-                        <SelectItem value="dashed">Dashed</SelectItem>
-                        <SelectItem value="dotted">Dotted</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+                    <div className="space-y-2 md:space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                          Stroke Width
+                        </Label>
+                        <span className="text-xs text-muted-foreground">{strokeWidth}px</span>
+                      </div>
+                      <Slider
+                        value={[strokeWidth]}
+                        onValueChange={([value]) => setStrokeWidth(value)}
+                        min={1}
+                        max={20}
+                        step={1}
+                        data-testid="slider-stroke-width"
+                      />
+                    </div>
 
-                  <div className="space-y-3">
-                    <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                      Measurement Units
-                    </Label>
-                    <Select value={measurementUnit} onValueChange={(v) => setMeasurementUnit(v as any)}>
-                      <SelectTrigger data-testid="select-measurement-unit">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="mm">Millimeters (mm)</SelectItem>
-                        <SelectItem value="cm">Centimeters (cm)</SelectItem>
-                        <SelectItem value="ft">Feet (ft)</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <div className="space-y-2 md:space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                          Opacity
+                        </Label>
+                        <span className="text-xs text-muted-foreground">{opacity}%</span>
+                      </div>
+                      <Slider
+                        value={[opacity]}
+                        onValueChange={([value]) => setOpacity(value)}
+                        min={10}
+                        max={100}
+                        step={5}
+                        data-testid="slider-opacity"
+                      />
+                    </div>
+
+                    <div className="space-y-2 md:space-y-3">
+                      <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                        Line Style
+                      </Label>
+                      <Select value={lineStyle} onValueChange={(v) => setLineStyle(v as any)}>
+                        <SelectTrigger data-testid="select-line-style">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="solid">Solid</SelectItem>
+                          <SelectItem value="dashed">Dashed</SelectItem>
+                          <SelectItem value="dotted">Dotted</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="space-y-2 md:space-y-3">
+                      <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                        Measurement Units
+                      </Label>
+                      <Select value={measurementUnit} onValueChange={(v) => setMeasurementUnit(v as any)}>
+                        <SelectTrigger data-testid="select-measurement-unit">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="mm">Millimeters (mm)</SelectItem>
+                          <SelectItem value="cm">Centimeters (cm)</SelectItem>
+                          <SelectItem value="ft">Feet (ft)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                </div>
-              </ScrollArea>
-            </TabsContent>
-            
-            <TabsContent value="layers" className="flex-1 m-0">
-              <ScrollArea className="h-full">
-                <div className="p-2 space-y-1">
-                  {layers.map((layer) => (
-                    <div
-                      key={layer.id}
-                      className={`flex items-center gap-2 p-2 rounded-md hover-elevate cursor-pointer ${
-                        layer.type === 'pdf' ? 'bg-muted/50' : ''
-                      }`}
-                      data-testid={`layer-${layer.id}`}
-                    >
-                      <GripVertical className="w-4 h-4 text-muted-foreground" />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
-                        onClick={() => toggleLayerVisibility(layer.id)}
-                        data-testid={`button-toggle-layer-${layer.id}`}
-                      >
-                        {layer.visible ? (
-                          <Eye className="h-4 w-4" />
-                        ) : (
-                          <EyeOff className="h-4 w-4 text-muted-foreground" />
+                </ScrollArea>
+              </TabsContent>
+              
+              <TabsContent value="layers" className="flex-1 m-0 min-h-0">
+                <ScrollArea className="h-full">
+                  <div className="p-2 space-y-1">
+                    {layers.map((layer) => (
+                      <div key={layer.id} className="space-y-1">
+                        <div
+                          className={`flex items-center gap-2 p-2 rounded-md hover-elevate cursor-pointer ${
+                            layer.type === 'pdf' ? 'bg-muted/50' : ''
+                          }`}
+                          data-testid={`layer-${layer.id}`}
+                        >
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 md:h-7 md:w-7"
+                            onClick={() => toggleLayerVisibility(layer.id)}
+                            data-testid={`button-toggle-layer-${layer.id}`}
+                          >
+                            {layer.visible ? (
+                              <Eye className="h-3 w-3 md:h-4 md:w-4" />
+                            ) : (
+                              <EyeOff className="h-3 w-3 md:h-4 md:w-4 text-muted-foreground" />
+                            )}
+                          </Button>
+                          <span className="flex-1 text-xs md:text-sm truncate">{layer.name}</span>
+                          {layer.type !== 'pdf' && (
+                            <span className="text-xs text-muted-foreground">
+                              {layer.shapes.length}
+                            </span>
+                          )}
+                        </div>
+                        
+                        {layer.type !== 'pdf' && layer.shapes.length > 0 && (
+                          <div className="ml-4 md:ml-6 space-y-0.5">
+                            {layer.shapes.map((shape, index) => {
+                              const ToolIcon = getToolIcon(shape.type);
+                              return (
+                                <div
+                                  key={shape.id}
+                                  className={`flex items-center gap-1 md:gap-2 p-1.5 md:p-2 rounded-md text-xs md:text-sm hover-elevate ${
+                                    selectedShapeId === shape.id ? 'bg-accent' : ''
+                                  }`}
+                                  onClick={() => setSelectedShapeId(shape.id)}
+                                  data-testid={`shape-${shape.id}`}
+                                >
+                                  <ToolIcon className="h-3 w-3 md:h-4 md:w-4 text-muted-foreground shrink-0" />
+                                  <span className="flex-1 truncate capitalize">{shape.type}</span>
+                                  
+                                  <div className="flex items-center gap-0.5">
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-5 w-5 md:h-6 md:w-6"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        moveShapeInLayer(shape.id, 'up');
+                                      }}
+                                      disabled={index === layer.shapes.length - 1}
+                                      data-testid={`button-move-up-${shape.id}`}
+                                    >
+                                      <ArrowUp className="h-2.5 w-2.5 md:h-3 md:w-3" />
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-5 w-5 md:h-6 md:w-6"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        moveShapeInLayer(shape.id, 'down');
+                                      }}
+                                      disabled={index === 0}
+                                      data-testid={`button-move-down-${shape.id}`}
+                                    >
+                                      <ArrowDown className="h-2.5 w-2.5 md:h-3 md:w-3" />
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-5 w-5 md:h-6 md:w-6"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleShapeVisibility(shape.id);
+                                      }}
+                                      data-testid={`button-toggle-shape-${shape.id}`}
+                                    >
+                                      {shape.visible ? (
+                                        <Eye className="h-2.5 w-2.5 md:h-3 md:w-3" />
+                                      ) : (
+                                        <EyeOff className="h-2.5 w-2.5 md:h-3 md:w-3 text-muted-foreground" />
+                                      )}
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-5 w-5 md:h-6 md:w-6 text-destructive hover:text-destructive"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        deleteShape(shape.id);
+                                      }}
+                                      data-testid={`button-delete-${shape.id}`}
+                                    >
+                                      <Trash2 className="h-2.5 w-2.5 md:h-3 md:w-3" />
+                                    </Button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
                         )}
-                      </Button>
-                      <span className="flex-1 text-sm truncate">{layer.name}</span>
-                      {layer.type !== 'pdf' && (
-                        <span className="text-xs text-muted-foreground">
-                          {layer.shapes.length}
-                        </span>
-                      )}
-                      {layer.locked && (
-                        <span className="text-xs text-muted-foreground">Locked</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </TabsContent>
-          </Tabs>
-        </aside>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </TabsContent>
+            </Tabs>
+          </aside>
+        )}
       </div>
     </div>
   );

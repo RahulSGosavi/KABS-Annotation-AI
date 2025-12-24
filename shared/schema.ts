@@ -89,6 +89,7 @@ export type AnnotationShape = {
   scaleY?: number;
   measurementValue?: number;
   measurementUnit?: 'mm' | 'cm' | 'ft';
+  angleValue?: number;
   visible: boolean;
   locked: boolean;
   name: string;
