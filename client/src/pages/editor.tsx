@@ -21,6 +21,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import {
   Layers,
@@ -56,14 +64,16 @@ import {
   X,
   PanelRightClose,
   PanelRightOpen,
+  Hand,
 } from 'lucide-react';
 import type { Project, AnnotationShape, LayerData } from '@shared/schema';
 import Konva from 'konva';
 
-type Tool = 'select' | 'freehand' | 'line' | 'arrow' | 'rect' | 'circle' | 'text' | 'measurement' | 'angle' | 'eraser';
+type Tool = 'select' | 'pan' | 'freehand' | 'line' | 'arrow' | 'rect' | 'circle' | 'text' | 'measurement' | 'angle' | 'eraser';
 
 const tools: { id: Tool; icon: typeof MousePointer2; label: string; shortcut: string }[] = [
   { id: 'select', icon: MousePointer2, label: 'Select / Move', shortcut: 'V' },
+  { id: 'pan', icon: Hand, label: 'Pan / Move Canvas', shortcut: 'H' },
   { id: 'freehand', icon: Pencil, label: 'Freehand Drawing', shortcut: 'P' },
   { id: 'line', icon: Minus, label: 'Line', shortcut: 'L' },
   { id: 'arrow', icon: ArrowRight, label: 'Arrow', shortcut: 'A' },
@@ -90,6 +100,7 @@ const getToolIcon = (toolType: string) => {
     case 'text': return Type;
     case 'measurement': return Ruler;
     case 'angle': return TriangleRight;
+    case 'pan': return Hand;
     default: return Layers;
   }
 };
@@ -146,6 +157,10 @@ export default function EditorPage() {
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [editingTextValue, setEditingTextValue] = useState('');
   const [textEditPosition, setTextEditPosition] = useState({ x: 0, y: 0 });
+
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportType, setExportType] = useState<'png' | 'pdf'>('png');
+  const [exportFilename, setExportFilename] = useState('');
 
   const { data: project, isLoading: projectLoading } = useQuery<Project>({
     queryKey: ['/api/projects', params.id],
@@ -389,7 +404,7 @@ export default function EditorPage() {
     
     const scaleX = containerWidth / width;
     const scaleY = containerHeight / height;
-    const newZoom = Math.min(scaleX, scaleY) * 0.85;
+    const newZoom = Math.min(scaleX, scaleY) * 0.95;
     
     setZoom(newZoom);
     setStagePosition({
@@ -539,7 +554,7 @@ export default function EditorPage() {
       return;
     }
 
-    if (activeTool === 'select') {
+    if (activeTool === 'select' || activeTool === 'pan') {
       const clickedOnEmpty = e.target === e.target.getStage();
       if (clickedOnEmpty) {
         setSelectedShapeId(null);
@@ -573,12 +588,13 @@ export default function EditorPage() {
     if (activeTool === 'freehand') {
       setCurrentPoints([pos.x, pos.y]);
     } else if (activeTool === 'text') {
+      const newId = generateId();
       const shape: AnnotationShape = {
-        id: generateId(),
+        id: newId,
         type: 'text',
         x: pos.x,
         y: pos.y,
-        text: 'Double-click to edit',
+        text: '',
         fontSize: 16,
         strokeColor,
         fillColor,
@@ -591,7 +607,21 @@ export default function EditorPage() {
       };
       addShape(shape);
       setIsDrawing(false);
-      setSelectedShapeId(shape.id);
+      setSelectedShapeId(newId);
+      
+      const stage = stageRef.current;
+      if (stage) {
+        const stageBox = stage.container().getBoundingClientRect();
+        setTextEditPosition({
+          x: stageBox.left + pos.x * zoom + stagePosition.x,
+          y: stageBox.top + pos.y * zoom + stagePosition.y,
+        });
+        setEditingTextId(newId);
+        setEditingTextValue('');
+        setTimeout(() => {
+          textEditRef.current?.focus();
+        }, 0);
+      }
     } else {
       setCurrentPoints([pos.x, pos.y, pos.x, pos.y]);
     }
@@ -812,7 +842,22 @@ export default function EditorPage() {
     }
   };
 
-  const handleExportCurrentPage = async () => {
+  const openExportDialog = (type: 'png' | 'pdf') => {
+    setExportType(type);
+    setExportFilename(project?.name || 'annotation');
+    setExportDialogOpen(true);
+  };
+
+  const handleExportConfirm = async () => {
+    setExportDialogOpen(false);
+    if (exportType === 'png') {
+      await performExportCurrentPage();
+    } else {
+      await performExportAllPages();
+    }
+  };
+
+  const performExportCurrentPage = async () => {
     if (!stageRef.current || !pageImage) {
       toast({
         title: 'Export failed',
@@ -824,6 +869,7 @@ export default function EditorPage() {
 
     try {
       transformerRef.current?.nodes([]);
+      setSelectedShapeId(null);
       
       await new Promise(resolve => setTimeout(resolve, 100));
       
@@ -833,6 +879,9 @@ export default function EditorPage() {
       
       stage.scale({ x: 1, y: 1 });
       stage.position({ x: 0, y: 0 });
+      
+      stage.batchDraw();
+      await new Promise(resolve => setTimeout(resolve, 50));
       
       const dataURL = stage.toDataURL({
         mimeType: 'image/png',
@@ -848,7 +897,7 @@ export default function EditorPage() {
       stage.position(originalPosition);
       
       const link = document.createElement('a');
-      link.download = `${project?.name || 'annotation'}-page-${currentPage}.png`;
+      link.download = `${exportFilename}-page-${currentPage}.png`;
       link.href = dataURL;
       document.body.appendChild(link);
       link.click();
@@ -856,7 +905,7 @@ export default function EditorPage() {
 
       toast({
         title: 'Export successful',
-        description: `Page ${currentPage} exported as PNG.`,
+        description: `Page ${currentPage} exported as PNG with annotations.`,
       });
     } catch (error) {
       console.error('Export failed:', error);
@@ -868,8 +917,113 @@ export default function EditorPage() {
     }
   };
 
-  const handleExportAllPages = async () => {
-    if (!params.id) {
+  const renderAnnotationsToCanvas = (ctx: CanvasRenderingContext2D, pageAnnotations: LayerData[]) => {
+    pageAnnotations.forEach(layer => {
+      if (layer.visible && layer.type !== 'pdf') {
+        layer.shapes.forEach(shape => {
+          if (shape.visible) {
+            ctx.save();
+            ctx.globalAlpha = shape.opacity || 1;
+            ctx.strokeStyle = shape.strokeColor || '#000';
+            ctx.fillStyle = shape.fillColor || 'transparent';
+            ctx.lineWidth = shape.strokeWidth || 2;
+            
+            if (shape.lineStyle === 'dashed') {
+              ctx.setLineDash([10, 5]);
+            } else if (shape.lineStyle === 'dotted') {
+              ctx.setLineDash([2, 4]);
+            }
+            
+            switch (shape.type) {
+              case 'rect':
+                if (shape.fillColor && shape.fillColor !== 'transparent') {
+                  ctx.fillRect(shape.x || 0, shape.y || 0, shape.width || 0, shape.height || 0);
+                }
+                ctx.strokeRect(shape.x || 0, shape.y || 0, shape.width || 0, shape.height || 0);
+                break;
+              case 'circle':
+                ctx.beginPath();
+                ctx.arc(shape.x || 0, shape.y || 0, shape.radius || 0, 0, Math.PI * 2);
+                if (shape.fillColor && shape.fillColor !== 'transparent') {
+                  ctx.fill();
+                }
+                ctx.stroke();
+                break;
+              case 'line':
+              case 'freehand':
+                if (shape.points && shape.points.length >= 2) {
+                  ctx.beginPath();
+                  ctx.moveTo(shape.points[0], shape.points[1]);
+                  for (let i = 2; i < shape.points.length; i += 2) {
+                    ctx.lineTo(shape.points[i], shape.points[i+1]);
+                  }
+                  if (shape.points.length === 2) {
+                    ctx.lineTo(shape.points[0] + 1, shape.points[1]);
+                  }
+                  ctx.stroke();
+                }
+                break;
+              case 'arrow':
+                if (shape.points && shape.points.length >= 4) {
+                  const [x1, y1, x2, y2] = shape.points;
+                  ctx.beginPath();
+                  ctx.moveTo(x1, y1);
+                  ctx.lineTo(x2, y2);
+                  ctx.stroke();
+                  
+                  const arrowAngle = Math.atan2(y2 - y1, x2 - x1);
+                  const headLength = 15;
+                  ctx.beginPath();
+                  ctx.moveTo(x2, y2);
+                  ctx.lineTo(x2 - headLength * Math.cos(arrowAngle - Math.PI / 6), y2 - headLength * Math.sin(arrowAngle - Math.PI / 6));
+                  ctx.moveTo(x2, y2);
+                  ctx.lineTo(x2 - headLength * Math.cos(arrowAngle + Math.PI / 6), y2 - headLength * Math.sin(arrowAngle + Math.PI / 6));
+                  ctx.stroke();
+                }
+                break;
+              case 'text':
+                ctx.font = `${shape.fontSize || 16}px sans-serif`;
+                ctx.fillStyle = shape.strokeColor || '#000';
+                ctx.fillText(shape.text || '', shape.x || 0, (shape.y || 0) + (shape.fontSize || 16));
+                break;
+              case 'measurement':
+                if (shape.points && shape.points.length >= 4) {
+                  const [mx1, my1, mx2, my2] = shape.points;
+                  ctx.beginPath();
+                  ctx.moveTo(mx1, my1);
+                  ctx.lineTo(mx2, my2);
+                  ctx.stroke();
+                  const midX = (mx1 + mx2) / 2;
+                  const midY = (my1 + my2) / 2;
+                  const dist = Math.sqrt(Math.pow(mx2 - mx1, 2) + Math.pow(my2 - my1, 2));
+                  ctx.font = '12px sans-serif';
+                  ctx.fillStyle = shape.strokeColor || '#000';
+                  ctx.fillText(`${dist.toFixed(1)} ${shape.measurementUnit || 'px'}`, midX, midY - 10);
+                }
+                break;
+              case 'angle':
+                if (shape.points && shape.points.length >= 6) {
+                  const [ax1, ay1, ax2, ay2, ax3, ay3] = shape.points;
+                  ctx.beginPath();
+                  ctx.moveTo(ax1, ay1);
+                  ctx.lineTo(ax2, ay2);
+                  ctx.lineTo(ax3, ay3);
+                  ctx.stroke();
+                  ctx.font = '14px sans-serif';
+                  ctx.fillStyle = shape.strokeColor || '#000';
+                  ctx.fillText(`${(shape.angleValue || 0).toFixed(1)}°`, ax2 + 10, ay2 - 10);
+                }
+                break;
+            }
+            ctx.restore();
+          }
+        });
+      }
+    });
+  };
+
+  const performExportAllPages = async () => {
+    if (!params.id || !stageRef.current) {
       toast({
         title: 'Export failed',
         description: 'No project to export.',
@@ -878,20 +1032,56 @@ export default function EditorPage() {
       return;
     }
 
+    const stage = stageRef.current;
+    const originalScale = { x: stage.scaleX(), y: stage.scaleY() };
+    const originalPosition = { x: stage.x(), y: stage.y() };
+
     try {
       toast({
         title: 'Exporting...',
-        description: 'Preparing PDF export. This may take a moment.',
+        description: 'Preparing PDF export with annotations. This may take a moment.',
       });
 
+      transformerRef.current?.nodes([]);
+      setSelectedShapeId(null);
+
       const { jsPDF } = await import('jspdf');
-      const pdf = new jsPDF('landscape', 'pt', 'letter');
+      
+      stage.scale({ x: 1, y: 1 });
+      stage.position({ x: 0, y: 0 });
+      stage.batchDraw();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      const currentDataURL = stage.toDataURL({
+        mimeType: 'image/png',
+        quality: 1,
+        pixelRatio: 2,
+        x: 0,
+        y: 0,
+        width: pageImage?.width || 800,
+        height: pageImage?.height || 600,
+      });
+      
+      stage.scale(originalScale);
+      stage.position(originalPosition);
+      
+      let pdf: InstanceType<typeof jsPDF> | null = null;
       
       for (let page = 1; page <= totalPages; page++) {
-        const imgResponse = await fetch(`/api/projects/${params.id}/pages/${page}`);
-        const imgData = await imgResponse.json();
+        let pageDataURL: string;
+        let imgWidth: number;
+        let imgHeight: number;
         
-        if (imgData.imageUrl) {
+        if (page === currentPage) {
+          pageDataURL = currentDataURL;
+          imgWidth = pageImage?.width || 800;
+          imgHeight = pageImage?.height || 600;
+        } else {
+          const imgResponse = await fetch(`/api/projects/${params.id}/pages/${page}`);
+          const imgData = await imgResponse.json();
+          
+          if (!imgData.imageUrl) continue;
+          
           const img = new window.Image();
           img.crossOrigin = 'anonymous';
           
@@ -900,38 +1090,53 @@ export default function EditorPage() {
             img.onerror = () => reject(new Error('Failed to load image'));
             img.src = imgData.imageUrl;
           });
-
-          const pageWidth = pdf.internal.pageSize.getWidth();
-          const pageHeight = pdf.internal.pageSize.getHeight();
           
-          const scale = Math.min(pageWidth / img.width, pageHeight / img.height) * 0.95;
-          const scaledWidth = img.width * scale;
-          const scaledHeight = img.height * scale;
-          const x = (pageWidth - scaledWidth) / 2;
-          const y = (pageHeight - scaledHeight) / 2;
-
-          if (page > 1) {
-            pdf.addPage();
+          const annotResponse = await fetch(`/api/annotations/${params.id}/${page}`);
+          let pageAnnotations: LayerData[] = [];
+          if (annotResponse.ok) {
+            const annotData = await annotResponse.json();
+            if (annotData && annotData.data) {
+              pageAnnotations = annotData.data;
+            }
           }
-
+          
           const canvas = document.createElement('canvas');
           canvas.width = img.width;
           canvas.height = img.height;
           const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(img, 0, 0);
-            const imageData = canvas.toDataURL('image/jpeg', 0.9);
-            pdf.addImage(imageData, 'JPEG', x, y, scaledWidth, scaledHeight);
-          }
+          
+          if (!ctx) continue;
+          
+          ctx.drawImage(img, 0, 0);
+          renderAnnotationsToCanvas(ctx, pageAnnotations);
+          
+          pageDataURL = canvas.toDataURL('image/png', 1);
+          imgWidth = img.width;
+          imgHeight = img.height;
         }
+        
+        const orientation = imgWidth > imgHeight ? 'landscape' : 'portrait';
+        
+        if (!pdf) {
+          pdf = new jsPDF({
+            orientation,
+            unit: 'pt',
+            format: [imgWidth, imgHeight]
+          });
+        } else {
+          pdf.addPage([imgWidth, imgHeight], orientation);
+        }
+        
+        pdf.addImage(pageDataURL, 'PNG', 0, 0, imgWidth, imgHeight);
       }
 
-      pdf.save(`${project?.name || 'annotation'}-all-pages.pdf`);
-
-      toast({
-        title: 'Export successful',
-        description: `All ${totalPages} pages exported as PDF.`,
-      });
+      if (pdf) {
+        pdf.save(`${exportFilename}-all-pages.pdf`);
+        toast({
+          title: 'Export successful',
+          description: `All ${totalPages} pages exported as PDF with annotations.`,
+        });
+      }
     } catch (error) {
       console.error('Export failed:', error);
       toast({
@@ -939,6 +1144,9 @@ export default function EditorPage() {
         description: 'Failed to export PDF. Please try again.',
         variant: 'destructive',
       });
+    } finally {
+      stage.scale(originalScale);
+      stage.position(originalPosition);
     }
   };
 
@@ -1401,11 +1609,11 @@ export default function EditorPage() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={handleExportCurrentPage} data-testid="button-export-png">
+              <DropdownMenuItem onClick={() => openExportDialog('png')} data-testid="button-export-png">
                 <Download className="mr-2 h-4 w-4" />
                 Current Page (PNG)
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={handleExportAllPages} data-testid="button-export-pdf">
+              <DropdownMenuItem onClick={() => openExportDialog('pdf')} data-testid="button-export-pdf">
                 <Download className="mr-2 h-4 w-4" />
                 All Pages (PDF)
               </DropdownMenuItem>
@@ -1424,10 +1632,10 @@ export default function EditorPage() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={handleExportCurrentPage}>
+              <DropdownMenuItem onClick={() => openExportDialog('png')}>
                 Current Page (PNG)
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={handleExportAllPages}>
+              <DropdownMenuItem onClick={() => openExportDialog('pdf')}>
                 All Pages (PDF)
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -1504,7 +1712,7 @@ export default function EditorPage() {
         <main 
           ref={containerRef}
           className="flex-1 relative overflow-hidden bg-muted/30"
-          style={{ cursor: activeTool === 'select' ? 'default' : activeTool === 'eraser' ? 'crosshair' : 'crosshair' }}
+          style={{ cursor: activeTool === 'pan' ? 'grab' : activeTool === 'select' ? 'default' : 'crosshair' }}
         >
           {pageLoading && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
@@ -1527,7 +1735,7 @@ export default function EditorPage() {
             onTouchStart={handlePointerDown}
             onTouchMove={handlePointerMove}
             onTouchEnd={handlePointerUp}
-            draggable={activeTool === 'select' && !isDrawing}
+            draggable={activeTool === 'pan' && !isDrawing}
             onDragEnd={(e) => {
               setStagePosition({
                 x: e.target.x(),
@@ -1933,6 +2141,44 @@ export default function EditorPage() {
           </aside>
         )}
       </div>
+
+      <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Export {exportType === 'png' ? 'Current Page as PNG' : 'All Pages as PDF'}</DialogTitle>
+            <DialogDescription>
+              Enter a filename for your export. The file extension will be added automatically.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-4 py-4">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="export-filename">Filename</Label>
+              <Input
+                id="export-filename"
+                value={exportFilename}
+                onChange={(e) => setExportFilename(e.target.value)}
+                placeholder="Enter filename"
+                data-testid="input-export-filename"
+              />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {exportType === 'png' 
+                ? `Will save as: ${exportFilename}-page-${currentPage}.png`
+                : `Will save as: ${exportFilename}-all-pages.pdf`
+              }
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportDialogOpen(false)} data-testid="button-export-cancel">
+              Cancel
+            </Button>
+            <Button onClick={handleExportConfirm} disabled={!exportFilename.trim()} data-testid="button-export-confirm">
+              <Download className="h-4 w-4 mr-2" />
+              Export
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
