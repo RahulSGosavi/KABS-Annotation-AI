@@ -576,10 +576,8 @@ export default function EditorPage() {
     if (!pos) return;
 
     if (activeTool === 'angle') {
-      if (anglePoints.length < 4) {
+      if (anglePoints.length < 6) {
         setAnglePoints([...anglePoints, pos.x, pos.y]);
-      } else {
-        setAnglePoints([pos.x, pos.y]);
       }
       return;
     }
