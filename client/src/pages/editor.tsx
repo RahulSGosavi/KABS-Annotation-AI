@@ -906,12 +906,27 @@ export default function EditorPage() {
       stage.scale(originalScale);
       stage.position(originalPosition);
       
+      const byteString = atob(dataURL.split(',')[1]);
+      const mimeString = dataURL.split(',')[0].split(':')[1].split(';')[0];
+      const ab = new ArrayBuffer(byteString.length);
+      const ia = new Uint8Array(ab);
+      for (let i = 0; i < byteString.length; i++) {
+        ia[i] = byteString.charCodeAt(i);
+      }
+      const blob = new Blob([ab], { type: mimeString });
+      const blobUrl = URL.createObjectURL(blob);
+      
       const link = document.createElement('a');
       link.download = `${exportFilename}-page-${currentPage}.png`;
-      link.href = dataURL;
+      link.href = blobUrl;
+      link.style.display = 'none';
       document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link);
+      
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(blobUrl);
+      }, 100);
 
       toast({
         title: 'Export successful',
