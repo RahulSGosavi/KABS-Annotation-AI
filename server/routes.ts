@@ -350,9 +350,13 @@ export async function registerRoutes(
   });
 
   // Get page image URL for a project (with lazy conversion for legacy projects)
-  app.get('/api/projects/:id/pages/:pageNumber', async (req, res) => {
+  app.get('/api/projects/:id/pages/:pageNumberZoom', async (req, res) => {
     try {
-      const { id, pageNumber } = req.params;
+      const { id, pageNumberZoom } = req.params;
+      
+      // Extract page number from "page:zoom" format
+      const pageNumber = pageNumberZoom.split(':')[0];
+      
       const project = await storage.getProject(id);
       
       if (!project) {
