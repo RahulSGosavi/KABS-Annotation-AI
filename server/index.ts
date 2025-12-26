@@ -2,6 +2,9 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { db } from "./db";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 const httpServer = createServer(app);
@@ -59,7 +62,29 @@ app.use((req, res, next) => {
   next();
 });
 
+async function initializeDatabase() {
+  try {
+    log("Initializing database...");
+    
+    // Read and execute the setup SQL file
+    const setupSqlPath = path.join(process.cwd(), 'setup-database.sql');
+    if (fs.existsSync(setupSqlPath)) {
+      const setupSql = fs.readFileSync(setupSqlPath, 'utf-8');
+      await db.execute(setupSql);
+      log("Database tables created successfully");
+    } else {
+      log("Setup SQL file not found, skipping database initialization");
+    }
+    
+    log("Database initialized successfully");
+  } catch (error) {
+    log(`Database initialization failed: ${error}`);
+    // Don't throw error, let the app continue and handle database errors gracefully
+  }
+}
+
 (async () => {
+  await initializeDatabase();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
