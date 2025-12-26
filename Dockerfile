@@ -36,8 +36,7 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/.env ./.env
 
 # Copy frontend build
-COPY --from=builder /app/frontend/client/dist ./frontend/client/dist
-COPY --from=builder /app/frontend/client/index.html ./frontend/client/index.html
+COPY --from=builder /app/dist/public ./dist/public
 
 USER nextjs
 
