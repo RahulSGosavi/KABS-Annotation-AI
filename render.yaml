@@ -1,0 +1,35 @@
+services:
+  # Web service
+  - type: web
+    name: kabs-annotate
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+    healthCheck:
+      path: /api/health
+      checkInterval: 30
+      timeout: 10
+      retries: 3
+
+  # Optional: PostgreSQL database (if not using Supabase)
+  # - type: pserv
+  #   name: kabs-annotate-db
+  #   plan: free
+  #   databaseName: kabsannotate
+  #   user: kabsuser
