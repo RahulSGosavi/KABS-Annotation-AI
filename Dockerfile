@@ -29,6 +29,9 @@ ENV NODE_ENV production
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
+# Create uploads directory with proper permissions
+RUN mkdir -p /app/uploads && chown -R nextjs:nodejs /app/uploads
+
 # Copy the built application
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
